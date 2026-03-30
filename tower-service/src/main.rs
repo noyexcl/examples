@@ -31,7 +31,7 @@ impl<S> Timeout<S> {
 impl<S, Request> Service<Request> for Timeout<S>
 where
     S: Service<Request>,
-    S::Error: Into<BoxError>,
+    S::Error: Into<BoxError>, // 内側のサービスのエラーをトレイトオブジェクトに変換するために必要な制約
 {
     type Response = S::Response;
     type Error = BoxError;
@@ -76,7 +76,7 @@ pub struct ResponseFuture<F> {
 impl<F, Response, Error> Future for ResponseFuture<F>
 where
     F: Future<Output = Result<Response, Error>>,
-    Error: Into<BoxError>,
+    Error: Into<BoxError>, //  内側のサービスのエラーをトレイトオブジェクトにするために必要な制約
 {
     type Output = Result<Response, BoxError>;
 
@@ -112,8 +112,15 @@ where
 
         // もし #[pin] でアノテートされていないフィールドを持っていたとしたら、それは普通の &mut になる
 
+        // 仮にここでエラーを返すとしたら、内側のサービスのエラーとこのサービスでのエラーの2種類が存在するのだが
+        // 戻り値の型はどのように表現したら良いか？という問題がある
+        //
+        // ここではエラーを両方とも std::errror::Error のトレイトオブジェクトにすることで解決している
+        // 従って ResponseFuture, Service の Error型変数 に Into<BoxError> という制約を付ける必要がある
+        // この方法の利点やその他の方法については補足1を参照
         match response_future.poll(cx) {
             Poll::Ready(result) => {
+                // 内側のサービスのエラー
                 let result = result.map_err(Into::into);
                 return Poll::Ready(result);
             }
@@ -122,6 +129,7 @@ where
 
         match sleep.poll(cx) {
             Poll::Ready(()) => {
+                // このサービスでのエラー
                 let err = Box::new(TimeoutError(()));
                 return Poll::Ready(Err(err));
             }
@@ -147,11 +155,12 @@ impl std::error::Error for TimeoutError {}
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /*
---- Error 型 ---
-Service が返すことになっている Error 型はジェネリックになっていて、内側のサービスのエラー型同じ型である
-しかしその型については何も知らず、その型を構築することも出来ない
+--- 補足1: Error 型 ---
+Service は内側のサービスで生じたエラーをそのまま返す必要があるが、内側のサービス自体がジェネリックになっているので
+そのエラー型については何も知らず、その型を構築することも出来ない
+つまり、外側のサービスで生じたエラーを内側のサービスのエラーの型と一致させて返すことが出来ない
 
-これについては3つの選択肢がある
+この解決法は3つの選択肢がある
 
 1. Box<dyn std::error::Error + Send + Sync> のように box されたエラートレイトオブジェクトを返す
 2. サービスのエラーなのかタイムアウトのエラーなのかを列挙した enum を返す
